@@ -61,6 +61,11 @@
 
         <service id="api_platform.serializer.context_builder" class="ApiPlatform\Core\Serializer\SerializerContextBuilder" public="false">
             <argument type="service" id="api_platform.metadata.resource.metadata_factory" />
+            <argument type="service" id="api_platform.security.expression_language" on-invalid="null" />
+            <argument type="service" id="security.authentication.trust_resolver" on-invalid="null" />
+            <argument type="service" id="security.role_hierarchy" on-invalid="null" />
+            <argument type="service" id="security.token_storage" on-invalid="null" />
+            <argument type="service" id="security.authorization_checker" on-invalid="null" />
         </service>
         <service id="ApiPlatform\Core\Serializer\SerializerContextBuilderInterface" alias="api_platform.serializer.context_builder" />
 

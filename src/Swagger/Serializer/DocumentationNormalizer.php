@@ -27,8 +27,15 @@ use ApiPlatform\Core\Metadata\Resource\Factory\ResourceMetadataFactoryInterface;
 use ApiPlatform\Core\Metadata\Resource\ResourceMetadata;
 use ApiPlatform\Core\Operation\Factory\SubresourceOperationFactoryInterface;
 use ApiPlatform\Core\PathResolver\OperationPathResolverInterface;
+use ApiPlatform\Core\Security\ExpressionLanguage;
+use ApiPlatform\Core\Security\IsGrantedVariablesTrait;
 use Psr\Container\ContainerInterface;
 use Symfony\Component\PropertyInfo\Type;
+use Symfony\Component\Security\Core\Authentication\AuthenticationTrustResolverInterface;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
+use Symfony\Component\Security\Core\Role\Role;
+use Symfony\Component\Security\Core\Role\RoleHierarchyInterface;
 use Symfony\Component\Serializer\NameConverter\NameConverterInterface;
 use Symfony\Component\Serializer\Normalizer\AbstractNormalizer;
 use Symfony\Component\Serializer\Normalizer\NormalizerInterface;
@@ -66,11 +73,69 @@ final class DocumentationNormalizer implements NormalizerInterface
     private $paginationPageParameterName;
     private $clientItemsPerPage;
     private $itemsPerPageParameterName;
+    private $expressionLanguage;
+    private $authenticationTrustResolver;
+    private $roleHierarchy;
+    private $tokenStorage;
+    private $authorizationChecker;
 
     /**
-     * @param ContainerInterface|FilterCollection|null $filterLocator The new filter locator or the deprecated filter collection
+     * DocumentationNormalizer constructor.
+     * @param ResourceMetadataFactoryInterface $resourceMetadataFactory
+     * @param PropertyNameCollectionFactoryInterface $propertyNameCollectionFactory
+     * @param PropertyMetadataFactoryInterface $propertyMetadataFactory
+     * @param ResourceClassResolverInterface $resourceClassResolver
+     * @param OperationMethodResolverInterface $operationMethodResolver
+     * @param OperationPathResolverInterface $operationPathResolver
+     * @param ExpressionLanguage|null $expressionLanguage
+     * @param AuthenticationTrustResolverInterface|null $authenticationTrustResolver
+     * @param RoleHierarchyInterface|null $roleHierarchy
+     * @param TokenStorageInterface|null $tokenStorage
+     * @param AuthorizationCheckerInterface|null $authorizationChecker
+     * @param UrlGeneratorInterface|null $urlGenerator
+     * @param null $filterLocator
+     * @param NameConverterInterface|null $nameConverter
+     * @param bool $oauthEnabled
+     * @param string $oauthType
+     * @param string $oauthFlow
+     * @param string $oauthTokenUrl
+     * @param string $oauthAuthorizationUrl
+     * @param array $oauthScopes
+     * @param array $apiKeys
+     * @param SubresourceOperationFactoryInterface|null $subresourceOperationFactory
+     * @param bool $paginationEnabled
+     * @param string $paginationPageParameterName
+     * @param bool $clientItemsPerPage
+     * @param string $itemsPerPageParameterName
      */
-    public function __construct(ResourceMetadataFactoryInterface $resourceMetadataFactory, PropertyNameCollectionFactoryInterface $propertyNameCollectionFactory, PropertyMetadataFactoryInterface $propertyMetadataFactory, ResourceClassResolverInterface $resourceClassResolver, OperationMethodResolverInterface $operationMethodResolver, OperationPathResolverInterface $operationPathResolver, UrlGeneratorInterface $urlGenerator = null, $filterLocator = null, NameConverterInterface $nameConverter = null, $oauthEnabled = false, $oauthType = '', $oauthFlow = '', $oauthTokenUrl = '', $oauthAuthorizationUrl = '', array $oauthScopes = [], array $apiKeys = [], SubresourceOperationFactoryInterface $subresourceOperationFactory = null, $paginationEnabled = true, $paginationPageParameterName = 'page', $clientItemsPerPage = false, $itemsPerPageParameterName = 'itemsPerPage')
+    public function __construct(
+        ResourceMetadataFactoryInterface $resourceMetadataFactory,
+        PropertyNameCollectionFactoryInterface $propertyNameCollectionFactory,
+        PropertyMetadataFactoryInterface $propertyMetadataFactory,
+        ResourceClassResolverInterface $resourceClassResolver,
+        OperationMethodResolverInterface $operationMethodResolver,
+        OperationPathResolverInterface $operationPathResolver,
+        ExpressionLanguage $expressionLanguage = null,
+        AuthenticationTrustResolverInterface $authenticationTrustResolver = null,
+        RoleHierarchyInterface $roleHierarchy = null,
+        TokenStorageInterface $tokenStorage = null,
+        AuthorizationCheckerInterface $authorizationChecker = null,
+        UrlGeneratorInterface $urlGenerator = null,
+        $filterLocator = null,
+        NameConverterInterface $nameConverter = null,
+        $oauthEnabled = false,
+        $oauthType = '',
+        $oauthFlow = '',
+        $oauthTokenUrl = '',
+        $oauthAuthorizationUrl = '',
+        array $oauthScopes = [],
+        array $apiKeys = [],
+        SubresourceOperationFactoryInterface $subresourceOperationFactory = null,
+        $paginationEnabled = true,
+        $paginationPageParameterName = 'page',
+        $clientItemsPerPage = false,
+        $itemsPerPageParameterName = 'itemsPerPage'
+    )
     {
         if ($urlGenerator) {
             @trigger_error(sprintf('Passing an instance of %s to %s() is deprecated since version 2.1 and will be removed in 3.0.', UrlGeneratorInterface::class, __METHOD__), E_USER_DEPRECATED);
@@ -98,6 +163,11 @@ final class DocumentationNormalizer implements NormalizerInterface
         $this->subresourceOperationFactory = $subresourceOperationFactory;
         $this->clientItemsPerPage = $clientItemsPerPage;
         $this->itemsPerPageParameterName = $itemsPerPageParameterName;
+        $this->expressionLanguage = $expressionLanguage;
+        $this->authenticationTrustResolver = $authenticationTrustResolver;
+        $this->roleHierarchy = $roleHierarchy;
+        $this->tokenStorage = $tokenStorage;
+        $this->authorizationChecker = $authorizationChecker;
     }
 
     /**
@@ -455,10 +525,82 @@ final class DocumentationNormalizer implements NormalizerInterface
         return $definitionKey;
     }
 
+    /**
+     *
+     */
     private function getDefinitionKey(string $resourceShortName, array $groups): string
     {
-        return $groups ? sprintf('%s-%s', $resourceShortName, implode('_', $groups)) : $resourceShortName;
+        $processedGroups = [];
+        foreach ($groups as $group => $groupConfiguration) {
+            if (is_int($group)) {
+                $processedGroups[] = $groupConfiguration;
+            } else {
+                $processedGroups[] = $group;
+            }
+        }
+
+        return $groups ? sprintf('%s-%s', $resourceShortName, implode('_', $processedGroups)) : $resourceShortName;
     }
+
+    /* -==================  @todo: refactoring to have as a service */
+
+    /**
+     * @param $resourceClass
+     * @return array
+     */
+    protected function getVariables($resourceClass)
+    {
+        if (null === $this->tokenStorage || null === $this->authenticationTrustResolver) {
+            throw new \LogicException(sprintf('The "symfony/security" library must be installed to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+        if (null === $this->tokenStorage->getToken()) {
+            throw new \LogicException(sprintf('The resource must be behind a firewall to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+        if (null === $this->expressionLanguage) {
+            throw new \LogicException(sprintf('The "symfony/expression-language" library must be installed to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+
+        $token = $this->tokenStorage->getToken();
+        $roles = $this->roleHierarchy ? $this->roleHierarchy->getReachableRoles($token->getRoles()) : $token->getRoles();
+
+        return [
+            'token' => $token,
+            'user' => $token->getUser(),
+            'roles' => array_map(function (Role $role) {
+                return $role->getRole();
+            }, $roles),
+            'trust_resolver' => $this->authenticationTrustResolver,
+            // needed for the is_granted expression function
+            'auth_checker' => $this->authorizationChecker,
+        ];
+    }
+
+    /**
+     * @param array $groups
+     * @return array
+     */
+    protected function extractGroups(array $groups, $resourceClass)
+    {
+        $serializerGroups = [];
+        foreach ($groups as $group => $groupConfiguration) {
+            if (is_array($groupConfiguration)) {
+                if (php_sapi_name() == 'cli') {
+                    $serializerGroups[] = $group;
+                } else if (array_key_exists('access_control', $groupConfiguration) &&
+                    $this->expressionLanguage->evaluate($groupConfiguration['access_control'], $this->getVariables($resourceClass))
+                ) {
+                    $serializerGroups[] = $group;
+                }
+            } else {
+                $serializerGroups[] = $groupConfiguration; // this means, that group was passed as simple string without configs
+            }
+        }
+
+        return $serializerGroups;
+    }
+
+
+    /* -================== END of @todo */
 
     /**
      * Gets a definition Schema Object.
@@ -484,7 +626,12 @@ final class DocumentationNormalizer implements NormalizerInterface
             $definitionSchema['externalDocs'] = ['url' => $iri];
         }
 
-        $options = isset($serializerContext[AbstractNormalizer::GROUPS]) ? ['serializer_groups' => $serializerContext[AbstractNormalizer::GROUPS]] : [];
+        $serializerGroups = [];
+        if (isset($serializerContext[AbstractNormalizer::GROUPS])) {
+            $serializerGroups = $this->extractGroups($serializerContext[AbstractNormalizer::GROUPS], $resourceClass);
+        }
+
+        $options = count($serializerGroups) ? ['serializer_groups' => $serializerGroups] : [];
         foreach ($this->propertyNameCollectionFactory->create($resourceClass, $options) as $propertyName) {
             $propertyMetadata = $this->propertyMetadataFactory->create($resourceClass, $propertyName);
             $normalizedPropertyName = $this->nameConverter ? $this->nameConverter->normalize($propertyName) : $propertyName;

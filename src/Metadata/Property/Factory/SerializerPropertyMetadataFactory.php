@@ -16,6 +16,12 @@ namespace ApiPlatform\Core\Metadata\Property\Factory;
 use ApiPlatform\Core\Exception\ResourceClassNotFoundException;
 use ApiPlatform\Core\Metadata\Property\PropertyMetadata;
 use ApiPlatform\Core\Metadata\Resource\Factory\ResourceMetadataFactoryInterface;
+use ApiPlatform\Core\Security\ExpressionLanguage;
+use Symfony\Component\Security\Core\Authentication\AuthenticationTrustResolverInterface;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
+use Symfony\Component\Security\Core\Role\Role;
+use Symfony\Component\Security\Core\Role\RoleHierarchyInterface;
 use Symfony\Component\Serializer\Mapping\Factory\ClassMetadataFactoryInterface as SerializerClassMetadataFactoryInterface;
 
 /**
@@ -29,13 +35,94 @@ final class SerializerPropertyMetadataFactory implements PropertyMetadataFactory
     private $resourceMetadataFactory;
     private $serializerClassMetadataFactory;
     private $decorated;
+    private $expressionLanguage;
+    private $authenticationTrustResolver;
+    private $roleHierarchy;
+    private $tokenStorage;
+    private $authorizationChecker;
 
-    public function __construct(ResourceMetadataFactoryInterface $resourceMetadataFactory, SerializerClassMetadataFactoryInterface $serializerClassMetadataFactory, PropertyMetadataFactoryInterface $decorated)
+    public function __construct(
+        ResourceMetadataFactoryInterface $resourceMetadataFactory,
+        SerializerClassMetadataFactoryInterface $serializerClassMetadataFactory,
+        PropertyMetadataFactoryInterface $decorated,
+        ExpressionLanguage $expressionLanguage = null,
+        AuthenticationTrustResolverInterface $authenticationTrustResolver = null,
+        RoleHierarchyInterface $roleHierarchy = null,
+        TokenStorageInterface $tokenStorage = null,
+        AuthorizationCheckerInterface $authorizationChecker = null
+    )
     {
         $this->resourceMetadataFactory = $resourceMetadataFactory;
         $this->serializerClassMetadataFactory = $serializerClassMetadataFactory;
         $this->decorated = $decorated;
+        $this->expressionLanguage = $expressionLanguage;
+        $this->authenticationTrustResolver = $authenticationTrustResolver;
+        $this->roleHierarchy = $roleHierarchy;
+        $this->tokenStorage = $tokenStorage;
+        $this->authorizationChecker = $authorizationChecker;
     }
+
+
+    /* -==================  @todo: refactoring to have as a service */
+
+    /**
+     * @param $resourceClass
+     * @return array
+     */
+    protected function getVariables($resourceClass)
+    {
+        if (null === $this->tokenStorage || null === $this->authenticationTrustResolver) {
+            throw new \LogicException(sprintf('The "symfony/security" library must be installed to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+        if (null === $this->tokenStorage->getToken()) {
+            throw new \LogicException(sprintf('The resource must be behind a firewall to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+        if (null === $this->expressionLanguage) {
+            throw new \LogicException(sprintf('The "symfony/expression-language" library must be installed to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+
+        $token = $this->tokenStorage->getToken();
+        $roles = $this->roleHierarchy ? $this->roleHierarchy->getReachableRoles($token->getRoles()) : $token->getRoles();
+
+        return [
+            'token' => $token,
+            'user' => $token->getUser(),
+            'roles' => array_map(function (Role $role) {
+                return $role->getRole();
+            }, $roles),
+            'trust_resolver' => $this->authenticationTrustResolver,
+            // needed for the is_granted expression function
+            'auth_checker' => $this->authorizationChecker,
+        ];
+    }
+
+    /**
+     * @param array $groups
+     * @return array
+     */
+    protected function extractGroups(array $groups, $resourceClass)
+    {
+        $serializerGroups = [];
+        foreach ($groups as $group => $groupConfiguration) {
+            if (is_array($groupConfiguration)) {
+                if (php_sapi_name() == 'cli') {
+                    $serializerGroups[] = $group;
+                } else if (array_key_exists('access_control', $groupConfiguration) &&
+                    $this->expressionLanguage->evaluate($groupConfiguration['access_control'], $this->getVariables($resourceClass))
+                ) {
+                    $serializerGroups[] = $group;
+                }
+            } else {
+                $serializerGroups[] = $groupConfiguration; // this means, that group was passed as simple string without configs
+            }
+        }
+
+        return $serializerGroups;
+    }
+
+
+    /* -================== END of @todo */
+
 
     /**
      * {@inheritdoc}
@@ -51,6 +138,9 @@ final class SerializerPropertyMetadataFactory implements PropertyMetadataFactory
         }
 
         list($normalizationGroups, $denormalizationGroups) = $this->getEffectiveSerializerGroups($options, $resourceClass);
+
+        $normalizationGroups = $this->extractGroups($normalizationGroups, $resourceClass);
+        $denormalizationGroups = $this->extractGroups($denormalizationGroups, $resourceClass);
 
         $propertyMetadata = $this->transformReadWrite($propertyMetadata, $resourceClass, $property, $normalizationGroups, $denormalizationGroups);
         $propertyMetadata = $this->transformLinkStatus($propertyMetadata, $normalizationGroups, $denormalizationGroups);

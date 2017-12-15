@@ -16,8 +16,14 @@ namespace ApiPlatform\Core\Serializer;
 use ApiPlatform\Core\Api\OperationType;
 use ApiPlatform\Core\Exception\RuntimeException;
 use ApiPlatform\Core\Metadata\Resource\Factory\ResourceMetadataFactoryInterface;
+use ApiPlatform\Core\Security\ExpressionLanguage;
 use ApiPlatform\Core\Util\RequestAttributesExtractor;
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Security\Core\Authentication\AuthenticationTrustResolverInterface;
+use Symfony\Component\Security\Core\Authentication\Token\Storage\TokenStorageInterface;
+use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
+use Symfony\Component\Security\Core\Role\Role;
+use Symfony\Component\Security\Core\Role\RoleHierarchyInterface;
 
 /**
  * {@inheritdoc}
@@ -27,10 +33,81 @@ use Symfony\Component\HttpFoundation\Request;
 final class SerializerContextBuilder implements SerializerContextBuilderInterface
 {
     private $resourceMetadataFactory;
+    private $expressionLanguage;
+    private $authenticationTrustResolver;
+    private $roleHierarchy;
+    private $tokenStorage;
+    private $authorizationChecker;
 
-    public function __construct(ResourceMetadataFactoryInterface $resourceMetadataFactory)
-    {
+    public function __construct(
+        ResourceMetadataFactoryInterface $resourceMetadataFactory,
+        ExpressionLanguage $expressionLanguage = null,
+        AuthenticationTrustResolverInterface $authenticationTrustResolver = null,
+        RoleHierarchyInterface $roleHierarchy = null,
+        TokenStorageInterface $tokenStorage = null,
+        AuthorizationCheckerInterface $authorizationChecker = null
+    ) {
         $this->resourceMetadataFactory = $resourceMetadataFactory;
+        $this->expressionLanguage = $expressionLanguage;
+        $this->authenticationTrustResolver = $authenticationTrustResolver;
+        $this->roleHierarchy = $roleHierarchy;
+        $this->tokenStorage = $tokenStorage;
+        $this->authorizationChecker = $authorizationChecker;
+    }
+
+    /**
+     * @param $resourceClass
+     * @return array
+     */
+    protected function getVariables($resourceClass)
+    {
+        if (null === $this->tokenStorage || null === $this->authenticationTrustResolver) {
+            throw new \LogicException(sprintf('The "symfony/security" library must be installed to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+        if (null === $this->tokenStorage->getToken()) {
+            throw new \LogicException(sprintf('The resource must be behind a firewall to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+        if (null === $this->expressionLanguage) {
+            throw new \LogicException(sprintf('The "symfony/expression-language" library must be installed to use the "access_control" attribute on class "%s".', $resourceClass));
+        }
+
+        $token = $this->tokenStorage->getToken();
+        $roles = $this->roleHierarchy ? $this->roleHierarchy->getReachableRoles($token->getRoles()) : $token->getRoles();
+
+        return [
+            'token' => $token,
+            'user' => $token->getUser(),
+            'roles' => array_map(function (Role $role) {
+                return $role->getRole();
+            }, $roles),
+            'trust_resolver' => $this->authenticationTrustResolver,
+            // needed for the is_granted expression function
+            'auth_checker' => $this->authorizationChecker,
+        ];
+    }
+
+    /**
+     * @param array $groups
+     * @return array
+     */
+    protected function extractGroups(array $groups, $resourceClass)
+    {
+        $serializerGroups = [];
+        foreach ($groups as $group => $groupConfiguration) {
+            if (is_array($groupConfiguration)) {
+                if (php_sapi_name() == 'cli') {
+                    $serializerGroups[] = $group;
+                } else if (array_key_exists('access_control', $groupConfiguration) &&
+                    $this->expressionLanguage->evaluate($groupConfiguration['access_control'], $this->getVariables($resourceClass))
+                ) {
+                    $serializerGroups[] = $group;
+                }
+            } else {
+                $serializerGroups[] = $groupConfiguration; // this means, that group was passed as simple string without configs
+            }
+        }
+
+        return $serializerGroups;
     }
 
     /**
@@ -91,6 +168,9 @@ final class SerializerContextBuilder implements SerializerContextBuilderInterfac
             $context['subresource_property'] = $attributes['subresource_property'];
             $context['subresource_resource_class'] = $attributes['subresource_resource_class'] ?? null;
         }
+
+        $resourceClass = $attributes['resource_class'];
+        $context['groups'] = $this->extractGroups($context['groups'], $resourceClass);
 
         return $context;
     }

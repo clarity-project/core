@@ -13,6 +13,11 @@
             <argument type="service" id="api_platform.resource_class_resolver" />
             <argument type="service" id="api_platform.operation_method_resolver" />
             <argument type="service" id="api_platform.operation_path_resolver" />
+            <argument type="service" id="api_platform.security.expression_language" on-invalid="null" />
+            <argument type="service" id="security.authentication.trust_resolver" on-invalid="null" />
+            <argument type="service" id="security.role_hierarchy" on-invalid="null" />
+            <argument type="service" id="security.token_storage" on-invalid="null" />
+            <argument type="service" id="security.authorization_checker" on-invalid="null" />
             <argument>null</argument>
             <argument type="service" id="api_platform.filter_locator" />
             <argument type="service" id="api_platform.name_converter" on-invalid="ignore" />
